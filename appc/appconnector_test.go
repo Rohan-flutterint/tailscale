@@ -13,6 +13,7 @@ import (
 	xmaps "golang.org/x/exp/maps"
 	"golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/appc/appctest"
+	"tailscale.com/appc/routeinfo"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/must"
 )
@@ -65,6 +66,10 @@ func TestUpdateRoutes(t *testing.T) {
 	routes := []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("192.0.0.1/32")}
 	a.updateRoutes(routes)
 
+	if !slices.Equal(a.routeInfo.Control, routes) {
+		t.Fatalf("got %v, want %v", a.routeInfo.Control, routes)
+	}
+
 	slices.SortFunc(rc.Routes(), prefixCompare)
 	rc.SetRoutes(slices.Compact(rc.Routes()))
 	slices.SortFunc(routes, prefixCompare)
@@ -76,6 +81,29 @@ func TestUpdateRoutes(t *testing.T) {
 
 	// Ensure that the contained /32 is removed, replaced by the /24.
 	wantRemoved := []netip.Prefix{netip.MustParsePrefix("192.0.2.1/32")}
+	if !slices.EqualFunc(rc.RemovedRoutes(), wantRemoved, prefixEqual) {
+		t.Fatalf("unexpected removed routes: %v", rc.RemovedRoutes())
+	}
+}
+
+func TestUpdateRoutesNotUnadvertiseRoutesFromOtherSources(t *testing.T) {
+	rc := &appctest.RouteCollector{}
+	a := NewAppConnector(t.Logf, rc)
+	testRi := routeinfo.NewRouteInfo()
+	a.routeInfo.Local = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
+	testRi.Local = append(testRi.Local, netip.MustParsePrefix("192.0.2.0/24"))
+	rc.StoreRouteInfo(testRi)
+
+	routes := []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("192.0.0.1/32")}
+	a.updateRoutes(routes)
+	if !slices.Equal(a.routeInfo.Control, routes) {
+		t.Fatalf("got %v, want %v", a.routeInfo.Control, routes)
+	}
+
+	routes2 := []netip.Prefix{netip.MustParsePrefix("192.0.0.1/32")}
+	a.updateRoutes(routes2)
+
+	wantRemoved := []netip.Prefix{}
 	if !slices.EqualFunc(rc.RemovedRoutes(), wantRemoved, prefixEqual) {
 		t.Fatalf("unexpected removed routes: %v", rc.RemovedRoutes())
 	}

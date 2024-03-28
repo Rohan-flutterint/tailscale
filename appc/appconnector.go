@@ -11,6 +11,7 @@ package appc
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
@@ -67,6 +68,9 @@ type AppConnector struct {
 	// wildcards is the list of domain strings that match subdomains.
 	wildcards []string
 
+	// the in memory copy of all the routes that's advertised
+	routeInfo *routeinfo.RouteInfo
+
 	// queue provides ordering for update operations
 	queue execqueue.ExecQueue
 }
@@ -76,6 +80,7 @@ func NewAppConnector(logf logger.Logf, routeAdvertiser RouteAdvertiser) *AppConn
 	return &AppConnector{
 		logf:            logger.WithPrefix(logf, "appc: "),
 		routeAdvertiser: routeAdvertiser,
+		routeInfo:       routeinfo.NewRouteInfo(),
 	}
 }
 
@@ -150,12 +155,35 @@ func (e *AppConnector) updateRoutes(routes []netip.Prefix) {
 		return
 	}
 
+	routeInfo, err := e.routeAdvertiser.ReadRouteInfo()
+	if err != nil {
+		e.logf("failed to read routeInfo from store")
+	}
+	oldControl := routeInfo.Control
+	oldOtherRoutes := routeInfo.Routes(true, false, true)
+	fmt.Println("OldOtherRoutes: ", oldOtherRoutes)
+	var toRemove []netip.Prefix
+	for _, ipp := range oldControl {
+		if slices.Contains(routes, ipp) {
+			continue
+		}
+		// unadvertise the prefix if the prefix is not recorded from other source.
+		if !slices.Contains(oldOtherRoutes, ipp) {
+			toRemove = append(toRemove, ipp)
+		}
+	}
+
+	if err := e.routeAdvertiser.UnadvertiseRoute(toRemove...); err != nil {
+		e.logf("failed to unadvertise old routes: %v: %v", routes, err)
+	}
+	routeInfo.Control = routes
+	fmt.Println(toRemove)
 	if err := e.routeAdvertiser.AdvertiseRoute(routes...); err != nil {
 		e.logf("failed to advertise routes: %v: %v", routes, err)
 		return
 	}
 
-	var toRemove []netip.Prefix
+	toRemove = toRemove[:0]
 
 nextRoute:
 	for _, r := range routes {
@@ -173,8 +201,9 @@ nextRoute:
 	if err := e.routeAdvertiser.UnadvertiseRoute(toRemove...); err != nil {
 		e.logf("failed to unadvertise routes: %v: %v", toRemove, err)
 	}
-
 	e.controlRoutes = routes
+	e.routeInfo = routeInfo
+	e.routeAdvertiser.StoreRouteInfo(e.routeInfo)
 }
 
 // Domains returns the currently configured domain list.
